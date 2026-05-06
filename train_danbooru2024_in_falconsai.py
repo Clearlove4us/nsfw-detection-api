@@ -65,7 +65,7 @@ if __name__ == '__main__':
     print("=" * 40)
 
     # 2. Hugging Face 身份认证
-    login(token="哈希")
+    login(token="hf")
 
     # 3. 路径配置
     data_dir = r"D:\python-learning\FalconsAI_NSFW\danbooru_dataset"
@@ -99,7 +99,7 @@ if __name__ == '__main__':
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
-    # 7. 训练超参数 (集成 10 轮与早停监控指标)
+    # 7. 训练超参数
     training_args = TrainingArguments(
         output_dir="./falconsai_lora_anime_v2",
         per_device_train_batch_size=32,
@@ -108,12 +108,14 @@ if __name__ == '__main__':
         fp16=True,
         eval_strategy="epoch",
         save_strategy="epoch",
+        
+        
         learning_rate=5e-4,
-        num_train_epochs=3,
+        num_train_epochs=10,
         logging_steps=50,
-        load_best_model_at_end=True,  # 👈 早停必备：最终加载表现最好的一轮权重
-        metric_for_best_model="eval_accuracy",  # 👈 早停必备：监控验证集准确率
-        greater_is_better=True,  # 👈 早停必备：准确率越高越好
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_accuracy",
+        greater_is_better=True,
         remove_unused_columns=False,
         dataloader_num_workers=2,
     )
@@ -126,7 +128,7 @@ if __name__ == '__main__':
         eval_dataset=dataset["validation"],
         processing_class=processor,
         compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=2)]  # 👈 核心：连续2轮不提升则自动终止
+        #callbacks=[EarlyStoppingCallback(early_stopping_patience=3)]
     )
 
     print("🔥 开始炼丹！显卡风扇起飞预警...")
