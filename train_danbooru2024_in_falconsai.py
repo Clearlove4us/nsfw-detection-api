@@ -65,7 +65,7 @@ if __name__ == '__main__':
     print("=" * 40)
 
     # 2. Hugging Face 身份认证
-    login(token="hf")
+    login(token="")
 
     # 3. 路径配置
     data_dir = r"D:\python-learning\FalconsAI_NSFW\danbooru_dataset"
@@ -89,10 +89,10 @@ if __name__ == '__main__':
     # 6. 注入 LoRA
     print("✨ 正在注入 LoRA 模块进行二次元领域自适应...")
     lora_config = LoraConfig(
-        r=16,
+        r=8,
         lora_alpha=16,
         target_modules=["query", "value"],
-        lora_dropout=0.1,
+        lora_dropout=0.01,
         bias="none",
         modules_to_save=["classifier"],
     )
@@ -101,16 +101,21 @@ if __name__ == '__main__':
 
     # 7. 训练超参数
     training_args = TrainingArguments(
-        output_dir="./falconsai_lora_anime_v2",
+        output_dir="./falconsai_lora_anime_v3",
         per_device_train_batch_size=32,
         per_device_eval_batch_size=32,
         gradient_accumulation_steps=1,
         fp16=True,
         eval_strategy="epoch",
         save_strategy="epoch",
-        
-        
-        learning_rate=5e-4,
+
+        # 👇 核心防过拟合修改区 👇
+        learning_rate=3e-5,  # 1. 降低学习率（原来是5e-4），让模型学得更细腻
+        weight_decay=1e-4,  # 2. 新增 L2 正则化，惩罚过大的权重，防止死记硬背
+        lr_scheduler_type="cosine",  # 3. 新增余弦退火学习率调度，让学习率平滑下降
+
+        # 👆 核心防过拟合修改区 👆
+
         num_train_epochs=10,
         logging_steps=50,
         load_best_model_at_end=True,
@@ -141,7 +146,7 @@ if __name__ == '__main__':
     log_history = trainer.state.log_history
 
     # 将原始日志保存为 JSON
-    with open("./falconsai_lora_anime_v2/training_logs_v2.json", "w") as f:
+    with open("./falconsai_lora_anime_v3/training_logs_v3.json", "w") as f:
         json.dump(log_history, f, indent=4)
 
     train_epochs, train_loss = [], []
@@ -180,7 +185,7 @@ if __name__ == '__main__':
     plt.grid(True, linestyle='--', alpha=0.7)
 
     plt.tight_layout()
-    plot_path = "./falconsai_lora_anime_v2/training_curves_v2.png"
+    plot_path = "./falconsai_lora_anime_v3/training_curves_v3.png"
     plt.savefig(plot_path, dpi=300)  # 高清保存
     print(f"📊 训练曲线已保存至: {plot_path}")
     # ==========================================
@@ -212,6 +217,6 @@ if __name__ == '__main__':
     print("\n📊 混淆矩阵 (Confusion Matrix):")
     print(confusion_matrix(y_true, y_pred))
 
-    model.save_pretrained("./final_falconsai_lora_v2")
-    processor.save_pretrained("./final_falconsai_lora_v2")
-    print("💾 V2版本权重已永久保存至 ./final_falconsai_lora_v2")
+    model.save_pretrained("./final_falconsai_lora_v3")
+    processor.save_pretrained("./final_falconsai_lora_v3")
+    print("💾 V2版本权重已永久保存至 ./final_falconsai_lora_v3")
