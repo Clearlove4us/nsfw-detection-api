@@ -2,24 +2,25 @@ import os
 import torch
 import numpy as np
 import evaluate
+import json
+import matplotlib.pyplot as plt
 from datasets import load_dataset
 from transformers import (
     ViTImageProcessor,
     ViTForImageClassification,
     TrainingArguments,
-    Trainer
+    Trainer,
+    EarlyStoppingCallback  # 新增：引入早停回调模块
 )
 import torchvision.transforms as transforms
 from peft import LoraConfig, get_peft_model
-from huggingface_hub import login  # 引入 HF 登录模块
+from huggingface_hub import login
 
 # ==========================================
 # 0. 全局变量与函数定义
-# (必须放在 if 外面，保证 DataLoader 子进程能找到并加载它们)
 # ==========================================
 model_name = "FalconsAI/nsfw_image_detection"
 
-# Processor 和 Augmentation 是轻量级的，放在全局初始化供所有子进程使用
 processor = ViTImageProcessor.from_pretrained(model_name)
 
 train_augmentation = transforms.Compose([
@@ -27,17 +28,20 @@ train_augmentation = transforms.Compose([
     transforms.ColorJitter(brightness=0.1, contrast=0.1)
 ])
 
+
 def train_transform(example_batch):
     augmented_images = [train_augmentation(x.convert("RGB")) for x in example_batch['image']]
     inputs = processor(augmented_images, return_tensors='pt')
     inputs['labels'] = example_batch['label']
     return inputs
 
+
 def eval_transform(example_batch):
     images = [x.convert("RGB") for x in example_batch['image']]
     inputs = processor(images, return_tensors='pt')
     inputs['labels'] = example_batch['label']
     return inputs
+
 
 def compute_metrics(eval_pred):
     metric = evaluate.load("accuracy")
@@ -46,17 +50,27 @@ def compute_metrics(eval_pred):
 
 
 # ==========================================
-# ⚠️ 核心执行入口：Windows 多进程保护罩
+# ⚠️ 核心执行入口
 # ==========================================
 if __name__ == '__main__':
-    # 0. Hugging Face 身份认证 (消除警告，满速下载)
-    # 请务必将下面这串 hf_ 开头的字符串替换为你自己的 Token！
-    login(token="私钥")
+    # 🌟 1. GPU 硬件检测与打印
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("=" * 40)
+    if device == "cuda":
+        print(f"🚀 硬件检测成功！正在使用 GPU 进行加速。")
+        print(f"🎮 显卡型号: {torch.cuda.get_device_name(0)}")
+        print(f"💾 显卡总显存: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+    else:
+        print("⚠️ 警告：未检测到可用的 GPU，目前正在使用纯 CPU 龟速炼丹！请检查虚拟环境。")
+    print("=" * 40)
 
-    # 1. 路径配置
+    # 2. Hugging Face 身份认证
+    login(token="哈希")
+
+    # 3. 路径配置
     data_dir = r"D:\python-learning\FalconsAI_NSFW\danbooru_dataset"
 
-    # 2. 加载数据集
+    # 4. 加载数据集
     print("🚀 正在加载数据集...")
     dataset = load_dataset("imagefolder", data_files={
         "train": f"{data_dir}/train/**",
@@ -64,16 +78,15 @@ if __name__ == '__main__':
         "test": f"{data_dir}/test/**"
     })
 
-    # 将放在全局的预处理函数挂载到数据集上
     dataset["train"].set_transform(train_transform)
     dataset["validation"].set_transform(eval_transform)
     dataset["test"].set_transform(eval_transform)
 
-    # 3. 加载预训练模型
+    # 5. 加载预训练模型
     print("🧠 正在加载原版 FalconsAI 模型...")
     model = ViTForImageClassification.from_pretrained(model_name)
 
-    # 4. 注入 LoRA
+    # 6. 注入 LoRA
     print("✨ 正在注入 LoRA 模块进行二次元领域自适应...")
     lora_config = LoraConfig(
         r=16,
@@ -86,9 +99,9 @@ if __name__ == '__main__':
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
-    # 5. 训练超参数
+    # 7. 训练超参数 (集成 10 轮与早停监控指标)
     training_args = TrainingArguments(
-        output_dir="./falconsai_lora_anime",
+        output_dir="./falconsai_lora_anime_v2",
         per_device_train_batch_size=32,
         per_device_eval_batch_size=32,
         gradient_accumulation_steps=1,
@@ -96,14 +109,16 @@ if __name__ == '__main__':
         eval_strategy="epoch",
         save_strategy="epoch",
         learning_rate=5e-4,
-        num_train_epochs=5,
+        num_train_epochs=3,
         logging_steps=50,
-        load_best_model_at_end=True,
+        load_best_model_at_end=True,  # 👈 早停必备：最终加载表现最好的一轮权重
+        metric_for_best_model="eval_accuracy",  # 👈 早停必备：监控验证集准确率
+        greater_is_better=True,  # 👈 早停必备：准确率越高越好
         remove_unused_columns=False,
         dataloader_num_workers=2,
     )
 
-    # 6. 启动训练器
+    # 8. 启动训练器 (挂载早停回调)
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -111,12 +126,64 @@ if __name__ == '__main__':
         eval_dataset=dataset["validation"],
         processing_class=processor,
         compute_metrics=compute_metrics,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=2)]  # 👈 核心：连续2轮不提升则自动终止
     )
 
     print("🔥 开始炼丹！显卡风扇起飞预警...")
     trainer.train()
 
-    # 7. 最终盲测与保存
+    # ==========================================
+    # 📈 9. 提取日志并绘制训练曲线 (用于论文第三章)
+    # ==========================================
+    print("📈 正在提取训练日志并绘制收敛曲线...")
+    log_history = trainer.state.log_history
+
+    # 将原始日志保存为 JSON
+    with open("./falconsai_lora_anime_v2/training_logs_v2.json", "w") as f:
+        json.dump(log_history, f, indent=4)
+
+    train_epochs, train_loss = [], []
+    eval_epochs, eval_loss, eval_accuracy = [], [], []
+
+    # 解析日志
+    for log in log_history:
+        if 'loss' in log and 'epoch' in log:
+            train_epochs.append(log['epoch'])
+            train_loss.append(log['loss'])
+        elif 'eval_loss' in log and 'epoch' in log:
+            eval_epochs.append(log['epoch'])
+            eval_loss.append(log['eval_loss'])
+            eval_accuracy.append(log['eval_accuracy'])
+
+    # 画图：双轴子图
+    plt.figure(figsize=(12, 5))
+
+    # 子图1：Loss 曲线
+    plt.subplot(1, 2, 1)
+    plt.plot(train_epochs, train_loss, label='Training Loss', color='blue', alpha=0.6)
+    plt.plot(eval_epochs, eval_loss, label='Validation Loss', color='red', marker='o')
+    plt.title('Training and Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.7)
+
+    # 子图2：Accuracy 曲线
+    plt.subplot(1, 2, 2)
+    plt.plot(eval_epochs, eval_accuracy, label='Validation Accuracy', color='green', marker='s')
+    plt.title('Validation Accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.7)
+
+    plt.tight_layout()
+    plot_path = "./falconsai_lora_anime_v2/training_curves_v2.png"
+    plt.savefig(plot_path, dpi=300)  # 高清保存
+    print(f"📊 训练曲线已保存至: {plot_path}")
+    # ==========================================
+
+    # 10. 最终盲测与保存
     print("🧪 正在使用 Test 测试集进行最终打分...")
     test_results = trainer.evaluate(dataset["test"])
     print(f"🎉 FalconsAI(LoRA微调后) 最终测试集准确率: {test_results['eval_accuracy']:.4f}")
@@ -127,42 +194,22 @@ if __name__ == '__main__':
     y_true = predictions.label_ids
 
     from sklearn.metrics import classification_report, confusion_matrix
+
     report = classification_report(
         y_true,
         y_pred,
         target_names=["normal", "porn"],
         digits=4
     )
-    print("\n" + "="*30)
+    print("\n" + "=" * 30)
     print("模型结业报告 (Test Set)")
-    print("="*30)
+    print("=" * 30)
     print(report)
-    print("="*30)
+    print("=" * 30)
 
     print("\n📊 混淆矩阵 (Confusion Matrix):")
     print(confusion_matrix(y_true, y_pred))
 
-    model.save_pretrained("./final_falconsai_lora")
-    processor.save_pretrained("./final_falconsai_lora")
-    print("💾 专门针对二次元优化的 LoRA 权重已永久保存至 ./final_falconsai_lora")
-    #调参对比选换文件夹路径，二次进修选加载已有权重。
-    # # 5. 训练超参数
-    # training_args = TrainingArguments(
-    #     output_dir="./falconsai_lora_anime_v2",  # 👈 加上 _v2
-    #     # ... (你修改的新参数，比如 learning_rate=1e-3 等)
-    #     # ...
-    # )
-    #
-    # # ... (中间代码不变) ...
-    #
-    # # 7. 最终盲测与保存
-    # model.save_pretrained("./final_falconsai_lora_v2")  # 👈 加上 _v2
-    # processor.save_pretrained("./final_falconsai_lora_v2")  # 👈 加上 _v2
-    # print("💾 V2版本权重已保存至 ./final_falconsai_lora_v2")
-    #
-    # # 替换掉原来的注入空白 LoRA 的代码：
-    # # model = get_peft_model(model, lora_config)
-    #
-    # # 改为直接加载你已经保存的成品：
-    # print("✨ 正在加载上一次的极品权重继续深造...")
-    # model = PeftModel.from_pretrained(base_model, "./final_falconsai_lora", is_trainable=True)
+    model.save_pretrained("./final_falconsai_lora_v2")
+    processor.save_pretrained("./final_falconsai_lora_v2")
+    print("💾 V2版本权重已永久保存至 ./final_falconsai_lora_v2")
